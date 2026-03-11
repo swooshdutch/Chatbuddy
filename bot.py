@@ -589,6 +589,14 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is online")
 
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), DummyHandler)
