@@ -4,6 +4,8 @@ bot.py — Main entry point for ChatBuddy, a Discord bot powered by Gemini.
 
 import os
 import io
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -575,6 +577,24 @@ async def help_command(interaction: discord.Interaction):
     embed.set_footer(text="Mention me or reply to my messages to chat!")
     await interaction.response.send_message(embed=embed)
 
+
+# ---------------------------------------------------------------------------
+# Dummy HTTP server for Back4app health checks
+# ---------------------------------------------------------------------------
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is online")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # ---------------------------------------------------------------------------
 # Run
