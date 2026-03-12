@@ -584,6 +584,18 @@ async def set_auto_chat_mode(
     )
 
 
+@bot.tree.command(name="set-auto-idle-message", description="Set the message posted when auto-chat enters idle mode")
+@app_commands.describe(message="The idle message (default: 'Going afk, ping me if you need me')")
+@app_commands.default_permissions(administrator=True)
+async def set_auto_idle_message(interaction: discord.Interaction, message: str):
+    message = message.replace("\\n", "\n")
+    bot_config["auto_chat_idle_message"] = message
+    save_config(bot_config)
+    await interaction.response.send_message(
+        f"✅ Auto-chat idle message set to:\n```{message}```", ephemeral=True
+    )
+
+
 # ---------------------------------------------------------------------------
 # Slash commands — Chat revival
 # ---------------------------------------------------------------------------
@@ -737,7 +749,8 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="💬 Auto-Chat Mode",
         value=(
-            "`/set-auto-chat-mode` — Auto-reply in a channel without needing mentions\n\n"
+            "`/set-auto-chat-mode` — Auto-reply in a channel without needing mentions\n"
+            "`/set-auto-idle-message` — Set the message posted when entering idle\n\n"
             "Checks every N seconds. Goes idle if the bot's own message is the latest "
             "for the configured timeout. A mention/reply reactivates it."
         ),
