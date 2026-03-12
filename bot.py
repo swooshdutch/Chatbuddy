@@ -4,6 +4,7 @@ bot.py — Main entry point for ChatBuddy, a Discord bot powered by Gemini.
 
 import os
 import io
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import discord
@@ -12,9 +13,10 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from config import load_config, save_config
-from gemini_api import generate
+from gemini_api import generate, build_system_prompt
 from utils import strip_mention, chunk_message, format_context, resolve_custom_emoji, extract_thoughts
 from revival import RevivalManager
+from auto_chat import AutoChatManager
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -39,8 +41,65 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Runtime config (loaded from disk on startup)
 bot_config: dict = {}
 
-# Revival manager (initialised in on_ready)
+# Managers (initialised in on_ready)
 revival_manager: RevivalManager | None = None
+auto_chat_manager: AutoChatManager | None = None
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+async def _read_soc_context(bot_ref, config: dict) -> str:
+    """Read SoC channel messages and return formatted context string (or '')."""
+    soc_context_enabled = config.get("soc_context_enabled", False)
+    soc_channel_id = config.get("soc_channel_id")
+    if not soc_context_enabled or not soc_channel_id:
+        return ""
+
+    soc_count = config.get("soc_context_count", 10)
+    soc_channel = bot_ref.get_channel(int(soc_channel_id))
+    if soc_channel is None:
+        return ""
+
+    soc_messages = []
+    async for msg in soc_channel.history(limit=soc_count):
+        soc_messages.append(msg)
+    soc_messages.reverse()
+
+    # Apply [ce] cutoff to SoC context
+    ce_idx = None
+    for i, m in enumerate(soc_messages):
+        if m.content.strip().lower() == "[ce]":
+            ce_idx = i
+    if ce_idx is not None:
+        soc_messages = soc_messages[ce_idx + 1:]
+
+    if not soc_messages:
+        return ""
+
+    soc_lines = []
+    for msg in soc_messages:
+        ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        soc_lines.append(f"[{ts}] {msg.content}")
+    return (
+        "\n[YOUR PREVIOUS THOUGHTS]\n"
+        + "\n".join(soc_lines)
+        + "\n[END YOUR PREVIOUS THOUGHTS]\n"
+    )
+
+
+async def _handle_soc_extraction(response_text: str, bot_ref, config: dict) -> str:
+    """Extract thoughts, send to SoC channel, return clean text."""
+    soc_enabled = config.get("soc_enabled", False)
+    soc_channel_id = config.get("soc_channel_id")
+    clean_text, thoughts_text = extract_thoughts(response_text)
+    if thoughts_text and soc_enabled and soc_channel_id:
+        thought_channel = bot_ref.get_channel(int(soc_channel_id))
+        if thought_channel is not None:
+            for chunk in chunk_message(thoughts_text):
+                await thought_channel.send(chunk)
+    return clean_text
+
 
 # ---------------------------------------------------------------------------
 # Events
@@ -48,11 +107,14 @@ revival_manager: RevivalManager | None = None
 
 @bot.event
 async def on_ready():
-    global bot_config, revival_manager
+    global bot_config, revival_manager, auto_chat_manager
     bot_config = load_config()
 
     revival_manager = RevivalManager(bot, bot_config)
     revival_manager.start()
+
+    auto_chat_manager = AutoChatManager(bot, bot_config)
+    auto_chat_manager.start()
 
     try:
         synced = await bot.tree.sync()
@@ -80,6 +142,15 @@ async def on_message(message: discord.Message):
         and message.reference.resolved.author == bot.user
     )
 
+    # Auto-chat reactivation: if mentioned/replied in the auto-chat channel
+    # while idle, wake it up and respond normally
+    auto_chat_channel = bot_config.get("auto_chat_channel_id")
+    if auto_chat_channel and channel_key == str(auto_chat_channel):
+        if auto_chat_manager and auto_chat_manager.is_idle:
+            if is_mentioned or is_reply_to_bot:
+                auto_chat_manager.reactivate()
+                # Fall through to normal response below
+
     if not is_mentioned and not is_reply_to_bot:
         return
 
@@ -88,6 +159,38 @@ async def on_message(message: discord.Message):
         if not user_text:
             user_text = "(empty message)"
 
+        # ── Secret word hidden turn ─────────────────────────────────────
+        secret_match = re.match(r"<set-secret-word\[(.+?)\]>", user_text, re.DOTALL)
+        if secret_match:
+            inner_prompt = secret_match.group(1).strip()
+            # Build hidden-turn system prompt: main + selector only
+            main_prompt = bot_config.get("system_prompt", "")
+            selector = bot_config.get("word_game_selector_prompt", "")
+            hidden_sys = (main_prompt + "\n\n" + selector).strip() if selector else main_prompt
+
+            hidden_response, _ = await generate(
+                prompt=inner_prompt,
+                context="",
+                config=bot_config,
+                system_prompt_override=hidden_sys,
+            )
+
+            # Parse {secret-word:WORD} from the response
+            word_match = re.search(r"\{secret-word:(.+?)\}", hidden_response)
+            if word_match:
+                secret = word_match.group(1).strip()
+                bot_config["secret_word"] = secret
+                save_config(bot_config)
+                await message.reply("✅ A new secret word has been set!", mention_author=False)
+            else:
+                await message.reply(
+                    "⚠️ Could not parse a secret word from the hidden turn. "
+                    "Make sure the selector prompt instructs the model to output `{secret-word:WORD}`.",
+                    mention_author=False,
+                )
+            return
+
+        # ── Normal response flow ────────────────────────────────────────
         history_limit = bot_config.get("chat_history_limit", 30)
         history_messages = []
         async for msg in message.channel.history(limit=history_limit, before=message):
@@ -98,27 +201,8 @@ async def on_message(message: discord.Message):
         ce_enabled = ce_channels.get(channel_key, True)
         context = format_context(history_messages, ce_enabled=ce_enabled)
 
-        # ── SoC context injection (after chat history) ────────────────
-        soc_context_enabled = bot_config.get("soc_context_enabled", False)
-        soc_channel_id = bot_config.get("soc_channel_id")
-        if soc_context_enabled and soc_channel_id:
-            soc_count = bot_config.get("soc_context_count", 10)
-            soc_channel = bot.get_channel(int(soc_channel_id))
-            if soc_channel is not None:
-                soc_messages = []
-                async for msg in soc_channel.history(limit=soc_count):
-                    soc_messages.append(msg)
-                soc_messages.reverse()
-                if soc_messages:
-                    soc_lines = []
-                    for msg in soc_messages:
-                        ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
-                        soc_lines.append(f"[{ts}] {msg.content}")
-                    context += (
-                        "\n[YOUR PREVIOUS THOUGHTS]\n"
-                        + "\n".join(soc_lines)
-                        + "\n[END YOUR PREVIOUS THOUGHTS]\n"
-                    )
+        # SoC context injection (after chat history)
+        context += await _read_soc_context(bot, bot_config)
 
         response_text, audio_bytes = await generate(
             user_text, context, bot_config,
@@ -126,29 +210,19 @@ async def on_message(message: discord.Message):
             speaker_id=str(message.author.id),
         )
 
-        # ── SoC thought extraction ────────────────────────────────────
-        soc_enabled = bot_config.get("soc_enabled", False)
-        clean_text, thoughts_text = extract_thoughts(response_text)
-        if thoughts_text and soc_enabled and soc_channel_id:
-            thought_channel = bot.get_channel(int(soc_channel_id))
-            if thought_channel is not None:
-                for chunk in chunk_message(thoughts_text):
-                    await thought_channel.send(chunk)
-        # Use the cleaned text (thoughts stripped) for the user-facing reply
-        response_text = clean_text
+        # SoC thought extraction
+        response_text = await _handle_soc_extraction(response_text, bot, bot_config)
 
         # Resolve custom emoji shortcodes before sending
         response_text = resolve_custom_emoji(response_text, message.guild)
 
         if audio_bytes:
-            # Post audio clip first, then the text transcript
             audio_file = discord.File(fp=io.BytesIO(audio_bytes), filename="chatbuddy_voice.wav")
             await message.reply(file=audio_file, mention_author=False)
             chunks = chunk_message(response_text)
             for chunk in chunks:
                 await message.channel.send(chunk)
         else:
-            # Text-only path
             chunks = chunk_message(response_text)
             for i, chunk in enumerate(chunks):
                 if i == 0:
@@ -198,13 +272,22 @@ async def set_temp(interaction: discord.Interaction, temperature: float):
     await interaction.response.send_message(f"✅ Temperature set to **{temperature}**.", ephemeral=True)
 
 
-@bot.tree.command(name="set-api-endpoint", description="Set the target Gemini text model endpoint")
-@app_commands.describe(endpoint="Model name (e.g. gemini-2.0-flash, gemma-3-27b-it)")
+@bot.tree.command(name="set-api-endpoint-gemini", description="Set the Gemini text model endpoint")
+@app_commands.describe(endpoint="Model name (e.g. gemini-2.0-flash)")
 @app_commands.default_permissions(administrator=True)
-async def set_api_endpoint(interaction: discord.Interaction, endpoint: str):
-    bot_config["model_endpoint"] = endpoint
+async def set_api_endpoint_gemini(interaction: discord.Interaction, endpoint: str):
+    bot_config["model_endpoint_gemini"] = endpoint
     save_config(bot_config)
-    await interaction.response.send_message(f"✅ Text model endpoint set to **{endpoint}**.", ephemeral=True)
+    await interaction.response.send_message(f"✅ Gemini endpoint set to **{endpoint}**.", ephemeral=True)
+
+
+@bot.tree.command(name="set-api-endpoint-gemma", description="Set the Gemma text model endpoint")
+@app_commands.describe(endpoint="Model name (e.g. gemma-3-27b-it)")
+@app_commands.default_permissions(administrator=True)
+async def set_api_endpoint_gemma(interaction: discord.Interaction, endpoint: str):
+    bot_config["model_endpoint_gemma"] = endpoint
+    save_config(bot_config)
+    await interaction.response.send_message(f"✅ Gemma endpoint set to **{endpoint}**.", ephemeral=True)
 
 
 @bot.tree.command(name="set-sys-instruct", description="Set the system instruction / prompt")
@@ -217,20 +300,25 @@ async def set_sys_instruct(interaction: discord.Interaction, prompt: str):
     await interaction.response.send_message("✅ System prompt updated and saved.", ephemeral=True)
 
 
-@bot.tree.command(name="show-sys-instruct", description="Display the current system prompt")
+@bot.tree.command(name="show-sys-instruct", description="Display the full effective system prompt")
 @app_commands.default_permissions(administrator=True)
 async def show_sys_instruct(interaction: discord.Interaction):
-    prompt = bot_config.get("system_prompt", "(not set)")
-    await interaction.response.send_message(
-        f"📝 **Current system prompt:**\n```\n{prompt}\n```", ephemeral=True
-    )
+    prompt = build_system_prompt(bot_config, include_word_game=True)
+    if not prompt:
+        prompt = "(not set)"
+
+    full_text = f"📝 **Current effective system prompt:**\n```\n{prompt}\n```"
+    chunks = chunk_message(full_text)
+    await interaction.response.send_message(chunks[0], ephemeral=True)
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
 # Slash commands — Text model mode
 # ---------------------------------------------------------------------------
 
-@bot.tree.command(name="set-model-mode", description="Toggle between default and Gemma text model modes")
+@bot.tree.command(name="set-model-mode", description="Switch between Gemini (default) and Gemma text model modes")
 @app_commands.describe(mode="default = standard Gemini, gemma = Gemma-compatible injection")
 @app_commands.choices(mode=[
     app_commands.Choice(name="default", value="default"),
@@ -240,12 +328,15 @@ async def show_sys_instruct(interaction: discord.Interaction):
 async def set_model_mode(interaction: discord.Interaction, mode: app_commands.Choice[str]):
     bot_config["model_mode"] = mode.value
     save_config(bot_config)
-    info = ""
     if mode.value == "gemma":
+        ep = bot_config.get("model_endpoint_gemma", "(not set)")
         info = (
-            "\n⚠️ Gemma mode: system prompt will be injected into user content "
-            "instead of using `systemInstruction`."
+            f"\n⚠️ Gemma mode: system prompt injected into user content.\n"
+            f"• Endpoint: `{ep}`"
         )
+    else:
+        ep = bot_config.get("model_endpoint_gemini", "gemini-2.0-flash")
+        info = f"\n• Endpoint: `{ep}`"
     await interaction.response.send_message(
         f"✅ Text model mode set to **{mode.value}**.{info}", ephemeral=True
     )
@@ -259,7 +350,6 @@ async def set_model_mode(interaction: discord.Interaction, mode: app_commands.Ch
 @app_commands.describe(enabled="True = bot sends .wav voice clips with every response, False = text only")
 @app_commands.default_permissions(administrator=True)
 async def set_audio_mode(interaction: discord.Interaction, enabled: bool):
-    # Guard: warn if audio mode is being enabled without an endpoint
     if enabled and not bot_config.get("audio_endpoint", "").strip():
         await interaction.response.send_message(
             "⚠️ No audio endpoint configured yet. "
@@ -395,6 +485,118 @@ async def set_soc_context(interaction: discord.Interaction, enabled: bool, count
 
 
 # ---------------------------------------------------------------------------
+# Slash commands — Dynamic system prompt
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="set-dynamic-system-prompt", description="Set an extra dynamic system prompt (appended after main)")
+@app_commands.describe(
+    prompt="The dynamic prompt text",
+    enabled="True = active, False = disabled",
+)
+@app_commands.default_permissions(administrator=True)
+async def set_dynamic_system_prompt(interaction: discord.Interaction, prompt: str, enabled: bool):
+    prompt = prompt.replace("\\n", "\n")
+    bot_config["dynamic_prompt"] = prompt
+    bot_config["dynamic_prompt_enabled"] = enabled
+    save_config(bot_config)
+    state = "enabled" if enabled else "disabled"
+    await interaction.response.send_message(
+        f"✅ Dynamic system prompt **{state}** and saved.", ephemeral=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slash commands — Word game
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="set-word-game", description="Set the word game rules prompt + enable/disable")
+@app_commands.describe(
+    prompt="Game rules prompt (use {secret-word} as placeholder)",
+    enabled="True = word game active, False = disabled",
+)
+@app_commands.default_permissions(administrator=True)
+async def set_word_game(interaction: discord.Interaction, prompt: str, enabled: bool):
+    prompt = prompt.replace("\\n", "\n")
+    bot_config["word_game_prompt"] = prompt
+    bot_config["word_game_enabled"] = enabled
+    save_config(bot_config)
+    state = "enabled" if enabled else "disabled"
+    await interaction.response.send_message(
+        f"✅ Word game **{state}**.\n"
+        f"Prompt contains `{{secret-word}}`: **{'yes' if '{secret-word}' in prompt else 'no'}**",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="set-word-game-selector-prompt", description="Set the hidden-turn prompt for selecting a secret word")
+@app_commands.describe(prompt="Instruction appended to main prompt for the hidden word-selection turn")
+@app_commands.default_permissions(administrator=True)
+async def set_word_game_selector_prompt(interaction: discord.Interaction, prompt: str):
+    prompt = prompt.replace("\\n", "\n")
+    bot_config["word_game_selector_prompt"] = prompt
+    save_config(bot_config)
+    await interaction.response.send_message(
+        "✅ Word game selector prompt saved.", ephemeral=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slash commands — Auto-chat mode
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="set-auto-chat-mode", description="Configure auto-chat mode for a channel")
+@app_commands.describe(
+    channel="The channel for auto-chat (one at a time)",
+    enabled="True = auto-chat active, False = disabled",
+    interval="Seconds between checks (default: 30)",
+    idle_minutes="Minutes of inactivity before idle mode (default: 10)",
+)
+@app_commands.default_permissions(administrator=True)
+async def set_auto_chat_mode(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    enabled: bool,
+    interval: int = 30,
+    idle_minutes: int = 10,
+):
+    if interval < 5:
+        await interaction.response.send_message("⚠️ Interval must be at least 5 seconds.", ephemeral=True)
+        return
+    if idle_minutes < 1:
+        await interaction.response.send_message("⚠️ Idle timeout must be at least 1 minute.", ephemeral=True)
+        return
+
+    bot_config["auto_chat_channel_id"] = str(channel.id)
+    bot_config["auto_chat_enabled"] = enabled
+    bot_config["auto_chat_interval"] = interval
+    bot_config["auto_chat_idle_minutes"] = idle_minutes
+    save_config(bot_config)
+
+    if auto_chat_manager:
+        auto_chat_manager.start()
+
+    state = "enabled" if enabled else "disabled"
+    await interaction.response.send_message(
+        f"✅ Auto-chat **{state}** for {channel.mention}.\n"
+        f"• Check interval: **{interval}s**\n"
+        f"• Idle timeout: **{idle_minutes}m**",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="set-auto-idle-message", description="Set the message posted when auto-chat enters idle mode")
+@app_commands.describe(message="The idle message (default: 'Going afk, ping me if you need me')")
+@app_commands.default_permissions(administrator=True)
+async def set_auto_idle_message(interaction: discord.Interaction, message: str):
+    message = message.replace("\\n", "\n")
+    bot_config["auto_chat_idle_message"] = message
+    save_config(bot_config)
+    await interaction.response.send_message(
+        f"✅ Auto-chat idle message set to:\n```{message}```", ephemeral=True
+    )
+
+
+# ---------------------------------------------------------------------------
 # Slash commands — Chat revival
 # ---------------------------------------------------------------------------
 
@@ -493,10 +695,23 @@ async def help_command(interaction: discord.Interaction):
             "`/set-api-key` — Set the Gemini API key\n"
             "`/set-chat-history` — Set context message count (default: 30)\n"
             "`/set-temp` — Set model temperature (0.0 – 2.0)\n"
-            "`/set-api-endpoint` — Set the Gemini **text** model endpoint\n"
-            "`/set-sys-instruct` — Set the system prompt\n"
-            "`/show-sys-instruct` — Display current system prompt\n"
-            "`/set-model-mode` — Switch text mode: `default` or `gemma`"
+            "`/set-api-endpoint-gemini` — Set the Gemini model endpoint\n"
+            "`/set-api-endpoint-gemma` — Set the Gemma model endpoint\n"
+            "`/set-sys-instruct` — Set the main system prompt\n"
+            "`/show-sys-instruct` — Display the full effective system prompt\n"
+            "`/set-model-mode` — Switch between `default` (Gemini) and `gemma`"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📝 Dynamic & Game Prompts",
+        value=(
+            "`/set-dynamic-system-prompt` — Set an extra prompt (appended after main) + enable/disable\n"
+            "`/set-word-game` — Set word game rules (`{secret-word}` placeholder) + enable/disable\n"
+            "`/set-word-game-selector-prompt` — Set the hidden-turn prompt for word selection\n\n"
+            "In chat, send `<set-secret-word[theme or constraint]>` to trigger a hidden turn "
+            "that picks a new secret word."
         ),
         inline=False,
     )
@@ -504,11 +719,9 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="🔊 Audio Clip Mode",
         value=(
-            "`/set-audio-endpoint` — Set the TTS model (e.g. `gemini-2.5-flash-preview-tts`)\n"
-            "`/set-audio-settings` — Choose the voice (Aoede, Puck, Charon, Kore, Fenrir…)\n"
-            "`/set-audio-mode` — Enable/disable audio clips globally\n\n"
-            "When **enabled**, every response gets a `.wav` voice clip + text transcript. "
-            "Works with both `default` and `gemma` text modes."
+            "`/set-audio-endpoint` — Set the TTS model\n"
+            "`/set-audio-settings` — Choose the voice\n"
+            "`/set-audio-mode` — Enable/disable audio clips globally"
         ),
         inline=False,
     )
@@ -527,9 +740,19 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "`/set-soc` — Set thoughts output channel + enable/disable\n"
             "`/set-soc-context` — Enable cross-channel thought context + message count\n\n"
-            "When enabled, text between `<my-thoughts>` and `</my-thoughts>` is "
-            "extracted and posted to the SoC channel. With SoC Context on, the bot "
-            "reads its recent thoughts as additional context for all responses."
+            "Extracts `<my-thoughts>` blocks to a dedicated channel. "
+            "`[ce]` works in the SoC channel too."
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="💬 Auto-Chat Mode",
+        value=(
+            "`/set-auto-chat-mode` — Auto-reply in a channel without needing mentions\n"
+            "`/set-auto-idle-message` — Set the message posted when entering idle\n\n"
+            "Checks every N seconds. Goes idle if the bot's own message is the latest "
+            "for the configured timeout. A mention/reply reactivates it."
         ),
         inline=False,
     )
@@ -540,36 +763,6 @@ async def help_command(interaction: discord.Interaction):
             "`/set-chat-revival` — Configure periodic chat revival + enable/disable\n"
             "`/set-cr-params` — Set active window duration & check interval\n"
             "`/set-cr-leave-msg` — Set the goodbye message after revival expires"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="💡 Quick Setup — Audio Mode",
-        value=(
-            "1. `/set-audio-endpoint gemini-2.5-flash-preview-tts`\n"
-            "2. `/set-audio-settings Aoede` *(or your preferred voice)*\n"
-            "3. `/set-audio-mode true`\n\n"
-            "To disable: `/set-audio-mode false`"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="💡 Using [ce] — Context End",
-        value=(
-            "Type **`[ce]`** in chat to cut off context. "
-            "The bot ignores all messages before the most recent `[ce]`."
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="💡 Chat Revival",
-        value=(
-            "When revival fires, the bot posts a conversation starter. "
-            "It then auto-replies during an active window without needing a mention. "
-            "Each reply shows remaining active time in the footer."
         ),
         inline=False,
     )
