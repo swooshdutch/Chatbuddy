@@ -11,42 +11,32 @@ CONFIG_FILE = "config.json"
 DEFAULTS = {
     "api_key": None,
     "system_prompt": "You are a helpful Discord chatbot called ChatBuddy.",
-    # Dual model endpoints — one for each mode
-    "model_endpoint_gemini": "gemini-2.0-flash",
-    "model_endpoint_gemma": "",
+    "model_endpoint": "gemini-2.0-flash",
     "temperature": 0.7,
     "chat_history_limit": 30,
     # Text model mode: "default" (systemInstruction supported) or "gemma"
+    # (system prompt injected into user content instead).
+    # Audio is a SEPARATE flag — see audio_enabled below.
     "model_mode": "default",
-    # Audio clip mode
+    # Audio clip mode — applies to all responses server-wide when True.
+    # After generating a text reply the bot also calls the TTS endpoint
+    # and sends a .wav attachment followed by the text transcript.
     "audio_enabled": False,
+    # TTS model to use. Set via /set-audio-endpoint. NO hard-coded fallback —
+    # must be explicitly configured before audio mode is useful.
     "audio_endpoint": "",
     "audio_settings": {"voice": "Aoede"},
-    "ce_channels": {},        # {str(channel_id): bool}
-    "allowed_channels": {},   # {str(channel_id): bool}
-    "chat_revival": None,
+    "ce_channels": {},        # {str(channel_id): bool} — per-channel [ce] toggle (default True)
+    "allowed_channels": {},   # {str(channel_id): bool} — channel whitelist (default False)
+    "chat_revival": None,     # {"channel_id": str, "interval_minutes": int, "system_instruct": str, "enabled": bool}
     "cr_leave_message": "Ok nice chatting to you all, see you later",
     "cr_active_minutes": 5,
     "cr_check_seconds": 30,
-    # Stream of Consciousness (SoC)
-    "soc_channel_id": None,
-    "soc_enabled": False,
-    "soc_context_enabled": False,
-    "soc_context_count": 10,
-    # Dynamic system prompt — appended after main prompt when enabled
-    "dynamic_prompt": "",
-    "dynamic_prompt_enabled": False,
-    # Word game
-    "word_game_prompt": "",         # prompt text with {secret-word} placeholder
-    "word_game_enabled": False,
-    "word_game_selector_prompt": "",  # system prompt for hidden word-selection turn
-    "secret_word": "",
-    # Auto-chat mode
-    "auto_chat_enabled": False,
-    "auto_chat_channel_id": None,
-    "auto_chat_interval": 30,        # seconds between checks
-    "auto_chat_idle_minutes": 10,    # idle timeout
-    "auto_chat_idle_message": "Going afk, ping me if you need me",
+    # Stream of Consciousness (SoC) — thought extraction & cross-channel context
+    "soc_channel_id": None,       # str(channel_id) — where thoughts are posted
+    "soc_enabled": False,         # master toggle for thought extraction
+    "soc_context_enabled": False, # read thoughts back as context
+    "soc_context_count": 10,      # how many thought messages to read
 }
 
 
