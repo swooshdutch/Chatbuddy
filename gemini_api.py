@@ -4,14 +4,10 @@ gemini_api.py — Async Gemini API client for ChatBuddy.
 Text model modes (model_mode):
   default  — Standard Gemini inference with systemInstruction support.
   gemma    — Gemma-compatible: system prompt injected into user content.
-              Use this when your text model doesn't support systemInstruction
-              (e.g. hosted Gemma variants).
 
 Audio clip mode (audio_enabled = True/False — fully independent of model_mode):
   When enabled, every text response is also converted to speech via the
-  Gemini Live API WebSocket (tts.py).  The result is a WAV audio clip posted
-  to Discord followed by the text transcript.
-  Works with both 'default' and 'gemma' text modes simultaneously.
+  Gemini Live API WebSocket (tts.py).
 """
 
 import aiohttp
@@ -34,6 +30,28 @@ MSG_GENERIC_ERROR = "⚠️ Something went wrong while generating a response. Pl
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def build_system_prompt(config: dict, *, include_word_game: bool = True) -> str:
+    """
+    Assemble the full system prompt from config.
+
+    Hierarchy:
+        Main system prompt
+        + Dynamic prompt (if enabled)
+        + Word game prompt with {secret-word} replaced (if enabled AND include_word_game)
+    """
+    parts = [config.get("system_prompt", "")]
+
+    if config.get("dynamic_prompt_enabled") and config.get("dynamic_prompt", ""):
+        parts.append(config["dynamic_prompt"])
+
+    if include_word_game and config.get("word_game_enabled") and config.get("word_game_prompt", ""):
+        secret = config.get("secret_word", "")
+        game_prompt = config["word_game_prompt"].replace("{secret-word}", secret)
+        parts.append(game_prompt)
+
+    return "\n\n".join(p for p in parts if p)
+
 
 def _build_user_text(
     prompt: str,
@@ -82,13 +100,13 @@ async def generate(
     revival_system_instruct: str = "",
     speaker_name: str = "",
     speaker_id: str = "",
+    system_prompt_override: str | None = None,
 ) -> tuple[str, bytes | None]:
     """
     Call the Gemini API and return (text_reply, wav_bytes_or_None).
 
-    When audio_enabled is True, wav_bytes is a complete WAV file ready to
-    attach to a Discord message.  On any TTS failure, wav_bytes is None and
-    only text_reply is returned (bot falls back to text-only gracefully).
+    system_prompt_override: if provided, used instead of the auto-assembled
+    system prompt.  Used by the word-game hidden turn.
     """
     api_key = config.get("api_key")
     if not api_key:
@@ -98,11 +116,27 @@ async def generate(
     gemma_mode    = model_mode == "gemma"
     audio_enabled = config.get("audio_enabled", False)
 
-    text_endpoint = config.get("model_endpoint", "gemini-2.0-flash")
-    temperature   = config.get("temperature", 0.7)
+    # Dual endpoints — pick based on mode
+    if gemma_mode:
+        text_endpoint = config.get("model_endpoint_gemma", "")
+        if not text_endpoint:
+            # Fallback to legacy key for migration
+            text_endpoint = config.get("model_endpoint", "gemini-2.0-flash")
+    else:
+        text_endpoint = config.get("model_endpoint_gemini", "gemini-2.0-flash")
+        if not text_endpoint:
+            text_endpoint = config.get("model_endpoint", "gemini-2.0-flash")
 
-    # Build effective system prompt (base + optional revival suffix)
-    system_prompt = config.get("system_prompt", "")
+    temperature = config.get("temperature", 0.7)
+
+    # Build effective system prompt
+    if system_prompt_override is not None:
+        system_prompt = system_prompt_override
+    else:
+        # Normal assembly: include_word_game=True unless revival
+        include_game = not bool(revival_system_instruct)
+        system_prompt = build_system_prompt(config, include_word_game=include_game)
+
     if revival_system_instruct:
         system_prompt = (system_prompt + "\n\n" + revival_system_instruct).strip()
 
@@ -171,7 +205,6 @@ async def generate(
     wav_bytes = await generate_tts(api_key, tts_endpoint, voice, text_reply)
 
     if wav_bytes is None:
-        # TTS failed — fall back to text-only (error already logged in tts.py)
         return text_reply, None
 
     return text_reply, wav_bytes

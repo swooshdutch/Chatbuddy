@@ -111,6 +111,13 @@ class RevivalManager:
                 async for m in soc_ch.history(limit=soc_count):
                     soc_msgs.append(m)
                 soc_msgs.reverse()
+                # Apply [ce] cutoff to SoC context
+                ce_idx = None
+                for i, m in enumerate(soc_msgs):
+                    if m.content.strip().lower() == "[ce]":
+                        ce_idx = i
+                if ce_idx is not None:
+                    soc_msgs = soc_msgs[ce_idx + 1:]
                 if soc_msgs:
                     soc_lines = []
                     for m in soc_msgs:
@@ -229,6 +236,13 @@ class RevivalManager:
                         async for m in soc_ch.history(limit=soc_count):
                             soc_msgs.append(m)
                         soc_msgs.reverse()
+                        # Apply [ce] cutoff to SoC context
+                        ce_idx = None
+                        for i, m in enumerate(soc_msgs):
+                            if m.content.strip().lower() == "[ce]":
+                                ce_idx = i
+                        if ce_idx is not None:
+                            soc_msgs = soc_msgs[ce_idx + 1:]
                         if soc_msgs:
                             soc_lines = []
                             for m in soc_msgs:
