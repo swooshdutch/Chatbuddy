@@ -743,6 +743,20 @@ async def edit_soul(
     await interaction.response.send_message(f"✅ Soul successfully {action} manually.", ephemeral=True)
 
 
+@bot.tree.command(name="set-soul-channel", description="Set the channel to log soul updates + enable/disable")
+@app_commands.describe(
+    channel="The channel to log updates to",
+    enabled="True = active, False = disabled",
+)
+@app_commands.default_permissions(administrator=True)
+async def set_soul_channel(interaction: discord.Interaction, channel: discord.TextChannel, enabled: bool):
+    bot_config["soul_channel_id"] = str(channel.id)
+    bot_config["soul_channel_enabled"] = enabled
+    save_config(bot_config)
+    state = "enabled" if enabled else "disabled"
+    await interaction.response.send_message(f"✅ Soul logging **{state}** in {channel.mention}.", ephemeral=True)
+
+
 # ---------------------------------------------------------------------------
 # Slash commands — Custom model settings
 # ---------------------------------------------------------------------------
