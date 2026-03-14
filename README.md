@@ -1,4 +1,4 @@
-# ChatBuddy v3.1
+# ChatBuddy v3-6
 
 ChatBuddy is a Discord chatbot powered by Google Gemini (and optionally Gemma or custom external models) that participates in server conversations through mentions, auto-chat mode, and scheduled chat revival — with support for audio responses, a word guessing game, stream-of-consciousness thought extraction, and fully configurable behaviour via slash commands.
 
