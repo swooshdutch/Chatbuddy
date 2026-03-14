@@ -11,7 +11,7 @@ from discord.ext import tasks
 
 from config import save_config
 from gemini_api import generate, build_system_prompt
-from utils import format_context, chunk_message, resolve_custom_emoji, extract_thoughts, handle_soul_updates
+from utils import format_context, chunk_message, resolve_custom_emoji, extract_thoughts
 
 
 class AutoChatManager:
@@ -164,16 +164,13 @@ class AutoChatManager:
                                 + "\n[END YOUR PREVIOUS THOUGHTS]\n"
                             )
 
-                response_text, audio_bytes = await generate(
+                response_text, audio_bytes, soul_logs = await generate(
                     prompt=last_msg.clean_content or "(empty message)",
                     context=context,
                     config=self.config,
                     speaker_name=last_msg.author.display_name,
                     speaker_id=str(last_msg.author.id),
                 )
-
-                # Soul processing
-                response_text = handle_soul_updates(response_text, self.config)
 
                 # SoC thought extraction
                 soc_enabled = self.config.get("soc_enabled", False)
@@ -194,6 +191,16 @@ class AutoChatManager:
                 if response_text:
                     for chunk in chunk_message(response_text):
                         await channel.send(chunk)
+
+                # Send soul logs to configured channel if present
+                if soul_logs and self.config.get("soul_channel_enabled"):
+                    ch_id = self.config.get("soul_channel_id")
+                    if ch_id:
+                        soul_ch = self.bot.get_channel(int(ch_id))
+                        if soul_ch:
+                            joined_logs = "\n".join(soul_logs)
+                            for log_chunk in chunk_message(joined_logs, limit=1900):
+                                await soul_ch.send(f"**🧠 Soul Updates:**\n{log_chunk}")
 
         except Exception as e:
             print(f"[AutoChat] Error during auto-reply: {e}")

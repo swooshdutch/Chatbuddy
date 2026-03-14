@@ -48,7 +48,9 @@ DEFAULTS = {
     # Soul (dynamic auto-updating memory)
     "soul_enabled": False,
     "soul_limit": 2000,
-    "soul_error_turn": "",  # stores 1-turn error message if update fails
+    "soul_error_turn": "",
+    "soul_channel_enabled": False,
+    "soul_channel_id": "",  # stores 1-turn error message if update fails
     # Auto-chat mode
     "auto_chat_enabled": False,
     "auto_chat_channel_id": None,

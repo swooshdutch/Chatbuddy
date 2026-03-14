@@ -5,7 +5,8 @@ Mention stripping, message chunking, context formatting, and emoji resolution.
 
 import re
 import os
-from typing import List
+import json
+from typing import List, Dict, Tuple
 
 import discord
 
@@ -158,84 +159,133 @@ def extract_thoughts(text: str) -> tuple[str, str | None]:
     return clean_text, thoughts_text
 
 
-def extract_soul_updates(text: str) -> tuple[str, list[tuple[str, str]]]:
+def extract_soul_updates(text: str) -> tuple[str, list[tuple[str, str, str]]]:
     """
-    Extract soul update commands from the response text.
-    
-    Returns (clean_text, updates):
-      - clean_text: text with all soul tags removed.
-      - updates: list of tuples (action, content) where action is 'update' or 'override'.
+    Extracts soul tags directly from generated text.
+    Returns:
+      (clean_text, [(action, id, content), ...])
+    Wait for markdown escapes and optional whitespace around [id]:
+       <!soul-update[id]: text>
+       <!soul-delete[id]>
     """
     updates = []
     
-    # Match <!soul-update: ...> or <!soul-override: ...>
-    # Use DOTALL to grab multi-line content if necessary
-    pattern = re.compile(r"<!soul-(update|override):\s*(.*?)>", re.DOTALL | re.IGNORECASE)
+    # Match <!soul-add-new[id]: ...>, <!soul-update[id]: ...>, <!soul-override[id]: ...>, <!soul-delete[id]>
+    # Handle possible markdown escaping or spaces (e.g. \<\!soul-update\[1\]:)
+    pattern = re.compile(
+        r"\\?<\s*\\?!\s*soul-(add-new|update|override|delete)\s*\\?\[\s*(.+?)\s*\\?\](?:(?:\\s*:\\s*)(.*?))?\\?>", 
+        re.DOTALL | re.IGNORECASE
+    )
     
     for match in pattern.finditer(text):
         action = match.group(1).lower()
-        content = match.group(2).strip()
-        updates.append((action, content))
+        entry_id = match.group(2).strip()
+        content = match.group(3)
+        if content:
+            content = content.strip()
+        else:
+            content = ""
+        updates.append((action, entry_id, content))
         
     clean_text = pattern.sub("", text).strip()
     return clean_text, updates
 
 
-def handle_soul_updates(response_text: str, config: dict) -> str:
-    """Extract soul tags, apply them immediately to soul.md if valid, and return cleaned text."""
-    soul_enabled = config.get("soul_enabled", False)
-    if not soul_enabled:
-        return response_text
-
+def handle_soul_updates(response_text: str, config: dict) -> tuple[str, list[str]]:
+    """
+    Extracts tags, enforces limit, and applies to JSON in soul.md.
+    Returns (clean_text, logs), where `logs` is a list of log strings to print to soul-channel.
+    """
     clean_text, updates = extract_soul_updates(response_text)
-    if not updates:
-        return clean_text
+    logs = []
+
+    soul_enabled = config.get("soul_enabled", False)
+    if not soul_enabled or not updates:
+        return clean_text, logs
 
     soul_limit = config.get("soul_limit", 2000)
-    
-    # Read current
-    current_text = ""
-    if os.path.exists("soul.md"):
+    soul_file = "soul.md"
+
+    # Read current soul.md
+    soul_data: Dict[str, str] = {}
+    if os.path.exists(soul_file):
         try:
-            with open("soul.md", "r", encoding="utf-8") as f:
-                current_text = f.read().strip()
+            with open(soul_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    soul_data = json.loads(content)
+        except json.JSONDecodeError:
+            # Conversion for legacy raw text to JSON
+            print("[Soul] Converting legacy text to JSON entry '0'.")
+            soul_data = {"0": content}
         except Exception as e:
-            print(f"[Soul] Error reading soul.md: {e}")
+            print(f"[Soul] Error reading soul file: {e}")
 
-    # Process updates (only the last one really takes effect if multiple)
-    new_text = current_text
-    applied = False
-    
-    for action, content in updates:
-        if action == "override":
-            new_text = content
-            applied = True
-        elif action == "update":
-            if new_text:
-                new_text += f"\n{content}"
+    # Process updates
+    made_changes = False
+    for action, entry_id, content in updates:
+        # Ignore empty ids
+        if not entry_id:
+            continue
+            
+        previous_data = soul_data.copy()
+
+        if action == "add-new":
+            if entry_id in soul_data:
+                soul_data[entry_id] += "\n" + content
+                logs.append(f"**Appended to existing [{entry_id}] (via add-new)**:\n`{content}`")
             else:
-                new_text = content
-            applied = True
+                soul_data[entry_id] = content
+                logs.append(f"**Added New [{entry_id}]**:\n`{content}`")
+            made_changes = True
 
-    if applied:
-        if len(new_text) > soul_limit:
-            # Reject update
-            print(f"[Soul] Update rejected: {len(new_text)} chars > {soul_limit} limit.")
-            # We record a 1-turn error injection
-            from config import save_config
-            config["soul_error_turn"] = (
-                f"System Error: Failed to update soul because it exceeded the {soul_limit} "
-                f"character limit (attempted {len(new_text)} chars). "
-                f"Faulty output rejected."
-            )
-            save_config(config)
-        else:
-            # Commit update
-            try:
-                with open("soul.md", "w", encoding="utf-8") as f:
-                    f.write(new_text)
-                print(f"[Soul] Updated soul.md ({len(new_text)} chars).")
-            except Exception as e:
-                print(f"[Soul] Failed to write soul.md: {e}")
+        elif action == "update":
+            if entry_id in soul_data:
+                soul_data[entry_id] += "\n" + content
+                logs.append(f"**Updated [{entry_id}]**:\nAppended: `{content}`")
+            else:
+                soul_data[entry_id] = content
+                logs.append(f"**Created [{entry_id}]**:\n`{content}`")
+            made_changes = True
 
-    return clean_text
+        elif action == "override":
+            soul_data[entry_id] = content
+            logs.append(f"**Overwrote [{entry_id}]**:\n`{content}`")
+            made_changes = True
+            
+        elif action == "delete":
+            if entry_id in soul_data:
+                del soul_data[entry_id]
+                logs.append(f"**Deleted [{entry_id}]**")
+                made_changes = True
+
+        # Validation per action step
+        if made_changes:
+            new_json_str = json.dumps(soul_data, indent=2, ensure_ascii=False)
+            if len(new_json_str) > soul_limit:
+                # Reject this specific update, rollback state
+                soul_data = previous_data
+                made_changes = False
+                if logs:
+                    logs.pop() # remove associated log for rejection
+                print(f"[Soul] Update rejected: {len(new_json_str)} chars > {soul_limit} limit.")
+                # We record a 1-turn error injection
+                from config import save_config
+                config["soul_error_turn"] = (
+                    f"System Error: Failed to apply soul action '{action}' on ID '{entry_id}' because it exceeded the {soul_limit} "
+                    f"character JSON file limit (attempted {len(new_json_str)} chars). "
+                    f"Faulty output rejected."
+                )
+                save_config(config)
+
+    # Save to file if we hold valid changes
+    if made_changes:
+        new_json_str = json.dumps(soul_data, indent=2, ensure_ascii=False)
+        try:
+            with open(soul_file, "w", encoding="utf-8") as f:
+                f.write(new_json_str)
+            print(f"[Soul] Updated soul.md ({len(new_json_str)} chars JSON).")
+        except Exception as e:
+            print(f"[Soul] Failed to write soul.md: {e}")
+
+    return clean_text, logs

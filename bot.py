@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from config import load_config, save_config
 from gemini_api import generate, build_system_prompt
-from utils import strip_mention, chunk_message, format_context, resolve_custom_emoji, extract_thoughts, extract_soul_updates, handle_soul_updates
+from utils import strip_mention, chunk_message, format_context, resolve_custom_emoji, extract_thoughts, extract_soul_updates
 from revival import RevivalManager
 from auto_chat import AutoChatManager
 
@@ -172,14 +172,11 @@ async def on_message(message: discord.Message):
         # SoC context injection (after chat history)
         context += await _read_soc_context(bot, bot_config)
 
-        response_text, audio_bytes = await generate(
+        response_text, audio_bytes, soul_logs = await generate(
             user_text, context, bot_config,
             speaker_name=message.author.display_name,
             speaker_id=str(message.author.id),
         )
-
-        # Soul processing
-        response_text = handle_soul_updates(response_text, bot_config)
 
         # SoC thought extraction
         response_text = await _handle_soc_extraction(response_text, bot, bot_config)
@@ -200,6 +197,17 @@ async def on_message(message: discord.Message):
                     await message.reply(chunk, mention_author=False)
                 else:
                     await message.channel.send(chunk)
+
+        # Send soul logs to configured channel if present
+        if soul_logs and bot_config.get("soul_channel_enabled"):
+            ch_id = bot_config.get("soul_channel_id")
+            if ch_id:
+                soul_ch = bot.get_channel(int(ch_id))
+                if soul_ch:
+                    joined_logs = "\n".join(soul_logs)
+                    for log_chunk in chunk_message(joined_logs, limit=1900):
+                        # Ensure we don't break code blocks if sending chunks
+                        await soul_ch.send(f"**🧠 Soul Updates:**\n{log_chunk}")
 
 
 # ---------------------------------------------------------------------------
@@ -877,7 +885,8 @@ async def help_command(interaction: discord.Interaction):
             "`/set-soul` — Enable/disable the self-updating soul memory\n"
             "`/show-soul` — View current soul memory\n"
             "`/edit-soul` — Manually adjust the soul memory\n"
-            "*Note: For Soul to work best, instruct the bot in its system prompt to save memories using `<!soul-update: text>` or `<!soul-override: text>`.*\n\n"
+            "`/set-soul-channel` — Set the channel to log soul updates + enable/disable\n"
+            "*Note: For Soul to work best, instruct the bot in its system prompt to save memories using `<!soul-add-new[id]: text>`, `<!soul-update[id]: text>`, `<!soul-override[id]: text>`, or `<!soul-delete[id]>`.*\n\n"
             "`/set-word-game` — Set word game rules (`{secret-word}` placeholder) + enable/disable\n"
             "`/set-word-game-selector-prompt` — Set the hidden-turn prompt for word selection\n"
             "`/set-secret-word` — Trigger a hidden turn to pick a new secret word (role-gated)\n"

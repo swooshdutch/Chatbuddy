@@ -93,6 +93,7 @@ Mention the bot (`@ChatBuddy`) or reply to one of its messages. That's it!
 | `/set-soul` | Enable/disable the self-updating soul memory |
 | `/show-soul` | View current soul memory |
 | `/edit-soul` | Manually adjust the soul memory |
+| `/set-soul-channel` | Set the channel to log soul updates + enable/disable |
 | `/set-word-game` | Set word game rules (use `{secret-word}` placeholder) + enable/disable |
 | `/set-word-game-selector-prompt` | Set the hidden-turn prompt the model uses to pick a word |
 | `/set-secret-word` | Trigger a hidden turn to pick a new secret word *(role-gated)* |
@@ -100,8 +101,10 @@ Mention the bot (`@ChatBuddy`) or reply to one of its messages. That's it!
 
 **💡 Note on Soul Memory:** 
 To use the Soul feature effectively, ensure you provide instructions in the main system prompt (via `/set-sys-instruct`) telling the bot *when* and *what* it should remember. The bot interacts with the soul file by outputting these exact tags in its response:
-- `<!soul-update: [text]>` to append new information.
-- `<!soul-override: [text]>` to completely overwrite the current memory.
+- `<!soul-add-new[id]: text>` to add a completely new memory entry.
+- `<!soul-update[id]: text>` to append to an existing memory.
+- `<!soul-override[id]: text>` to completely overwrite a memory ID.
+- `<!soul-delete[id]>` to remove a memory entirely.
 
 ### 🔊 Audio Clip Mode
 

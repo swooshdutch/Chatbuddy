@@ -15,6 +15,7 @@ import os
 import aiohttp
 
 from config import save_config
+from utils import handle_soul_updates
 from tts import generate_tts
 
 API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -131,16 +132,16 @@ async def generate(
     speaker_name: str = "",
     speaker_id: str = "",
     system_prompt_override: str | None = None,
-) -> tuple[str, bytes | None]:
+) -> tuple[str, bytes | None, list[str]]:
     """
-    Call the Gemini API and return (text_reply, wav_bytes_or_None).
+    Call the Gemini API and return (text_reply, wav_bytes_or_None, logs).
 
     system_prompt_override: if provided, used instead of the auto-assembled
     system prompt.  Used by the word-game hidden turn.
     """
     api_key = config.get("api_key")
     if not api_key:
-        return MSG_NO_KEY, None
+        return MSG_NO_KEY, None, []
 
     model_mode    = config.get("model_mode", "gemini")
     # Treat legacy "default" the same as "gemini"
@@ -160,7 +161,7 @@ async def generate(
     if custom_mode:
         text_endpoint = config.get("model_endpoint_custom", "")
         if not text_endpoint:
-            return "⚠️ No custom model endpoint configured. Run `/set-api-endpoint-custom` first.", None
+            return "⚠️ No custom model endpoint configured. Run `/set-api-endpoint-custom` first.", None, []
     elif gemma_mode:
         text_endpoint = config.get("model_endpoint_gemma", "")
         if not text_endpoint:
@@ -219,43 +220,46 @@ async def generate(
                 data   = await resp.json()
 
         if status == 429:
-            return MSG_RATE_LIMIT, None
+            return MSG_RATE_LIMIT, None, []
 
         if status != 200:
             err = str(data)
             if "SAFETY" in err.upper() or "blocked" in err.lower():
-                return MSG_SAFETY_BLOCK, None
+                return MSG_SAFETY_BLOCK, None, []
             print(f"[ChatBuddy] Text API error {status}: {data}")
-            return MSG_GENERIC_ERROR, None
+            return MSG_GENERIC_ERROR, None, []
 
         if data.get("promptFeedback", {}).get("blockReason"):
-            return MSG_SAFETY_BLOCK, None
+            return MSG_SAFETY_BLOCK, None, []
 
         text_reply = _extract_text(data)
         if text_reply is None:
-            return MSG_SAFETY_BLOCK, None
+            return MSG_SAFETY_BLOCK, None, []
+
+        # Process soul immediately before TTS or returning
+        text_reply, soul_logs = handle_soul_updates(text_reply, config)
 
     except aiohttp.ClientError as e:
         print(f"[ChatBuddy] HTTP error during text inference: {e}")
-        return MSG_GENERIC_ERROR, None
+        return MSG_GENERIC_ERROR, None, []
     except Exception as e:
         print(f"[ChatBuddy] Unexpected error during text inference: {e}")
-        return MSG_GENERIC_ERROR, None
+        return MSG_GENERIC_ERROR, None, []
 
     # ── Step 2: TTS via WebSocket Live API (only when audio is enabled) ────
     if not audio_enabled:
-        return text_reply, None
+        return text_reply, None, soul_logs
 
     tts_endpoint = config.get("audio_endpoint", "").strip()
     if not tts_endpoint:
         print("[ChatBuddy] audio_enabled=True but audio_endpoint is empty — skipping TTS.")
-        return text_reply, None
+        return text_reply, None, soul_logs
 
     voice = config.get("audio_settings", {}).get("voice", "Aoede")
 
     wav_bytes = await generate_tts(api_key, tts_endpoint, voice, text_reply)
 
     if wav_bytes is None:
-        return text_reply, None
+        return text_reply, None, soul_logs
 
-    return text_reply, wav_bytes
+    return text_reply, wav_bytes, soul_logs

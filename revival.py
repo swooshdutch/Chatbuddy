@@ -12,7 +12,7 @@ from discord.ext import tasks
 
 from config import save_config
 from gemini_api import generate
-from utils import format_context, chunk_message, resolve_custom_emoji, extract_thoughts, handle_soul_updates
+from utils import format_context, chunk_message, resolve_custom_emoji, extract_thoughts
 
 
 class RevivalManager:
@@ -130,15 +130,12 @@ class RevivalManager:
                     )
 
         # Generate the revival message
-        response_text, audio_bytes = await generate(
+        response_text, audio_bytes, soul_logs = await generate(
             prompt="Start a new conversation to revive the chat.",
             context=context,
             config=self.config,
             revival_system_instruct=system_instruct,
         )
-
-        # Soul processing
-        response_text = handle_soul_updates(response_text, self.config)
 
         if audio_bytes:
             audio_file = discord.File(fp=io.BytesIO(audio_bytes), filename="revival.wav")
@@ -162,6 +159,16 @@ class RevivalManager:
             chunks[-1] += footer
             for chunk in chunks:
                 await channel.send(chunk)
+
+        # Log soul changes
+        if soul_logs and self.config.get("soul_channel_enabled"):
+            ch_id = self.config.get("soul_channel_id")
+            if ch_id:
+                soul_ch = self.bot.get_channel(int(ch_id))
+                if soul_ch:
+                    joined_logs = "\n".join(soul_logs)
+                    for log_chunk in chunk_message(joined_logs, limit=1900):
+                        await soul_ch.send(f"**🧠 Soul Updates:**\n{log_chunk}")
 
         # Start the auto-reply active window, then relock when done
         self.bot.loop.create_task(
@@ -261,15 +268,12 @@ class RevivalManager:
                 if not user_text:
                     user_text = "(empty message)"
 
-                response_text, audio_bytes = await generate(
+                response_text, audio_bytes, soul_logs = await generate(
                     prompt=user_text,
                     context=context,
                     config=self.config,
                     revival_system_instruct=system_instruct,
                 )
-
-                # Soul processing
-                response_text = handle_soul_updates(response_text, self.config)
 
                 if audio_bytes:
                     audio_file = discord.File(fp=io.BytesIO(audio_bytes), filename="revival_reply.wav")
@@ -292,6 +296,16 @@ class RevivalManager:
                     chunks[-1] += footer
                     for chunk in chunks:
                         await channel.send(chunk)
+
+                # Log soul changes
+                if soul_logs and self.config.get("soul_channel_enabled"):
+                    ch_id = self.config.get("soul_channel_id")
+                    if ch_id:
+                        soul_ch = self.bot.get_channel(int(ch_id))
+                        if soul_ch:
+                            joined_logs = "\n".join(soul_logs)
+                            for log_chunk in chunk_message(joined_logs, limit=1900):
+                                await soul_ch.send(f"**🧠 Soul Updates:**\n{log_chunk}")
 
             except Exception as e:
                 print(f"[ChatBuddy] Revival auto-reply error: {e}")
