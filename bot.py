@@ -5,6 +5,7 @@ bot.py — Main entry point for ChatBuddy, a Discord bot powered by Gemini.
 import os
 import io
 import re
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import discord
@@ -532,9 +533,14 @@ async def set_word_game_selector_prompt(interaction: discord.Interaction, prompt
 @app_commands.describe(prompt="Theme or constraint for the secret word (e.g. 'animals', 'foods')")
 async def set_secret_word(interaction: discord.Interaction, prompt: str):
     # --- Role-based permission check ---
-    allowed_roles = bot_config.get("secret_word_allowed_roles", [])
-    is_admin = interaction.user.guild_permissions.administrator if interaction.guild else False
-    has_role = any(str(role.id) in allowed_roles for role in getattr(interaction.user, "roles", []))
+    allowed_roles = [str(r) for r in bot_config.get("secret_word_allowed_roles", [])]
+    is_admin = False
+    has_role = False
+    
+    if getattr(interaction, "guild", None) and isinstance(interaction.user, discord.Member):
+        is_admin = interaction.user.guild_permissions.administrator
+        has_role = any(str(role.id) in allowed_roles for role in interaction.user.roles)
+        
     if not is_admin and not has_role:
         await interaction.response.send_message(
             "⚠️ You don't have permission to use this command. "
@@ -679,7 +685,6 @@ async def set_soul(interaction: discord.Interaction, enabled: bool, limit: int =
 
 
 @bot.tree.command(name="show-soul", description="View the current contents of the soul")
-@app_commands.default_permissions(administrator=True)
 async def show_soul(interaction: discord.Interaction):
     if not os.path.exists("soul.md"):
         await interaction.response.send_message("📝 Soul is currently **empty** (file does not exist).", ephemeral=True)
@@ -688,7 +693,7 @@ async def show_soul(interaction: discord.Interaction):
     with open("soul.md", "r", encoding="utf-8") as f:
         soul_text = f.read().strip()
         
-    if not soul_text:
+    if not soul_text or soul_text == "{}":
         await interaction.response.send_message("📝 Soul is currently **empty**.", ephemeral=True)
         return
 
@@ -699,48 +704,78 @@ async def show_soul(interaction: discord.Interaction):
         await interaction.followup.send(chunk, ephemeral=True)
 
 
-@bot.tree.command(name="edit-soul", description="Manually append, overwrite, or wipe the soul file")
-@app_commands.describe(
-    wipe="True = delete everything in the soul file",
-    append="Text to add to the end",
-    overwrite="Text to replace the entire soul with",
-)
-@app_commands.default_permissions(administrator=True)
-async def edit_soul(
-    interaction: discord.Interaction,
-    wipe: bool = False,
-    append: str | None = None,
-    overwrite: str | None = None
-):
-    soul_limit = bot_config.get("soul_limit", 2000)
-    current_text = ""
-    if os.path.exists("soul.md") and not wipe and not overwrite:
+async def _read_soul() -> dict:
+    if not os.path.exists("soul.md"):
+        return {}
+    try:
         with open("soul.md", "r", encoding="utf-8") as f:
-            current_text = f.read().strip()
-            
-    new_text = current_text
-    if wipe:
-        new_text = ""
-    if overwrite:
-        new_text = overwrite.replace("\\n", "\n")
-    if append:
-        append_txt = append.replace("\\n", "\n")
-        new_text = f"{new_text}\n{append_txt}" if new_text else append_txt
+            content = f.read().strip()
+            if content:
+                return json.loads(content)
+    except:
+        pass
+    return {}
 
-    new_text = new_text.strip()
-    
-    if len(new_text) > soul_limit:
+async def _write_soul(interaction: discord.Interaction, soul_data: dict) -> bool:
+    new_json = json.dumps(soul_data, indent=2, ensure_ascii=False)
+    soul_limit = bot_config.get("soul_limit", 2000)
+    if len(new_json) > soul_limit:
         await interaction.response.send_message(
-            f"⚠️ Manual edit rejected: too large ({len(new_text)} > {soul_limit} limit).", 
+            f"⚠️ Manual edit rejected: too large ({len(new_json)} > {soul_limit} limit).", 
             ephemeral=True
         )
-        return
-
+        return False
     with open("soul.md", "w", encoding="utf-8") as f:
-        f.write(new_text)
-        
-    action = "wiped" if (wipe and not append and not overwrite) else "updated"
-    await interaction.response.send_message(f"✅ Soul successfully {action} manually.", ephemeral=True)
+        f.write(new_json)
+    return True
+
+@bot.tree.command(name="wipe-soul", description="Wipe the entire soul file empty")
+@app_commands.default_permissions(administrator=True)
+async def wipe_soul(interaction: discord.Interaction):
+    with open("soul.md", "w", encoding="utf-8") as f:
+        f.write("{}")
+    await interaction.response.send_message("✅ Soul successfully wiped.", ephemeral=True)
+
+@bot.tree.command(name="edit-soul-delete-entry", description="Delete an entry from the soul")
+@app_commands.describe(entry_name="The ID of the entry to delete")
+@app_commands.default_permissions(administrator=True)
+async def edit_soul_delete_entry(interaction: discord.Interaction, entry_name: str):
+    soul_data = await _read_soul()
+    if entry_name in soul_data:
+        soul_data.pop(entry_name, None)
+        if await _write_soul(interaction, soul_data):
+            await interaction.response.send_message(f"✅ Deleted entry **{entry_name}**.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"⚠️ Entry **{entry_name}** not found.", ephemeral=True)
+
+@bot.tree.command(name="edit-soul-add-entry", description="Add text to an entry (appends if exists)")
+@app_commands.describe(
+    entry_name="The ID of the entry",
+    entry_text="Text to append or create"
+)
+@app_commands.default_permissions(administrator=True)
+async def edit_soul_add_entry(interaction: discord.Interaction, entry_name: str, entry_text: str):
+    soul_data = await _read_soul()
+    entry_text = entry_text.replace("\\n", "\n")
+    if entry_name in soul_data:
+        soul_data[entry_name] += "\n" + entry_text
+    else:
+        soul_data[entry_name] = entry_text
+    if await _write_soul(interaction, soul_data):
+        await interaction.response.send_message(f"✅ Appended/added text to **{entry_name}**.", ephemeral=True)
+
+@bot.tree.command(name="edit-soul-overwrite", description="Replace the text of an entry")
+@app_commands.describe(
+    entry_name="The ID of the entry",
+    entry_text="Text to replace with"
+)
+@app_commands.default_permissions(administrator=True)
+async def edit_soul_overwrite(interaction: discord.Interaction, entry_name: str, entry_text: str):
+    soul_data = await _read_soul()
+    entry_text = entry_text.replace("\\n", "\n")
+    soul_data[entry_name] = entry_text
+    if await _write_soul(interaction, soul_data):
+        await interaction.response.send_message(f"✅ Overwrote entry **{entry_name}**.", ephemeral=True)
 
 
 @bot.tree.command(name="set-soul-channel", description="Set the channel to log soul updates + enable/disable")
