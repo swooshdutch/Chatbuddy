@@ -14,10 +14,13 @@ DEFAULTS = {
     # Dual model endpoints — one for each mode
     "model_endpoint_gemini": "gemini-2.0-flash",
     "model_endpoint_gemma": "",
+    # Custom (non-Google) model support
+    "api_key_custom": "",
+    "model_endpoint_custom": "",
     "temperature": 0.7,
     "chat_history_limit": 30,
-    # Text model mode: "default" (systemInstruction supported) or "gemma"
-    "model_mode": "default",
+    # Text model mode: "gemini" | "gemma" | "custom"
+    "model_mode": "gemini",
     # Audio clip mode
     "audio_enabled": False,
     "audio_endpoint": "",
@@ -41,6 +44,7 @@ DEFAULTS = {
     "word_game_enabled": False,
     "word_game_selector_prompt": "",  # system prompt for hidden word-selection turn
     "secret_word": "",
+    "secret_word_allowed_roles": [],  # role IDs allowed to use /set-secret-word
     # Auto-chat mode
     "auto_chat_enabled": False,
     "auto_chat_channel_id": None,

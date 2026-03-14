@@ -2,8 +2,9 @@
 gemini_api.py — Async Gemini API client for ChatBuddy.
 
 Text model modes (model_mode):
-  default  — Standard Gemini inference with systemInstruction support.
+  gemini   — Standard Gemini inference with systemInstruction support.
   gemma    — Gemma-compatible: system prompt injected into user content.
+  custom   — External / non-Google API with separate key and endpoint.
 
 Audio clip mode (audio_enabled = True/False — fully independent of model_mode):
   When enabled, every text response is also converted to speech via the
@@ -112,15 +113,28 @@ async def generate(
     if not api_key:
         return MSG_NO_KEY, None
 
-    model_mode    = config.get("model_mode", "default")
+    model_mode    = config.get("model_mode", "gemini")
+    # Treat legacy "default" the same as "gemini"
+    if model_mode == "default":
+        model_mode = "gemini"
     gemma_mode    = model_mode == "gemma"
+    custom_mode   = model_mode == "custom"
     audio_enabled = config.get("audio_enabled", False)
 
-    # Dual endpoints — pick based on mode
-    if gemma_mode:
+    # Pick API key — custom mode can override
+    if custom_mode:
+        effective_api_key = config.get("api_key_custom", "") or api_key
+    else:
+        effective_api_key = api_key
+
+    # Pick endpoint based on mode
+    if custom_mode:
+        text_endpoint = config.get("model_endpoint_custom", "")
+        if not text_endpoint:
+            return "⚠️ No custom model endpoint configured. Run `/set-api-endpoint-custom` first.", None
+    elif gemma_mode:
         text_endpoint = config.get("model_endpoint_gemma", "")
         if not text_endpoint:
-            # Fallback to legacy key for migration
             text_endpoint = config.get("model_endpoint", "gemini-2.0-flash")
     else:
         text_endpoint = config.get("model_endpoint_gemini", "gemini-2.0-flash")
@@ -141,7 +155,9 @@ async def generate(
         system_prompt = (system_prompt + "\n\n" + revival_system_instruct).strip()
 
     # ── Step 1: text inference via REST generateContent ────────────────────
-    user_text = _build_user_text(prompt, context, system_prompt, gemma_mode, speaker_name, speaker_id)
+    # Custom mode with Gemma-style injection when using non-Google APIs
+    inject_prompt = gemma_mode or custom_mode
+    user_text = _build_user_text(prompt, context, system_prompt, inject_prompt, speaker_name, speaker_id)
 
     text_body: dict = {
         "contents": [
@@ -155,11 +171,17 @@ async def generate(
         },
     }
 
-    # Only non-gemma modes use the top-level systemInstruction field
-    if not gemma_mode and system_prompt:
+    # Only standard Gemini mode uses the top-level systemInstruction field
+    if not inject_prompt and system_prompt:
         text_body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
-    text_url = f"{API_BASE}/{text_endpoint}:generateContent?key={api_key}"
+    # Build the request URL — custom endpoints may be full URLs
+    if custom_mode and text_endpoint.startswith("http"):
+        # Full external URL — append key as query param
+        sep = "&" if "?" in text_endpoint else "?"
+        text_url = f"{text_endpoint}{sep}key={effective_api_key}"
+    else:
+        text_url = f"{API_BASE}/{text_endpoint}:generateContent?key={effective_api_key}"
 
     try:
         async with aiohttp.ClientSession() as session:

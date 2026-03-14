@@ -159,37 +159,6 @@ async def on_message(message: discord.Message):
         if not user_text:
             user_text = "(empty message)"
 
-        # ── Secret word hidden turn ─────────────────────────────────────
-        secret_match = re.match(r"<set-secret-word\[(.+?)\]>", user_text, re.DOTALL)
-        if secret_match:
-            inner_prompt = secret_match.group(1).strip()
-            # Build hidden-turn system prompt: main + selector only
-            main_prompt = bot_config.get("system_prompt", "")
-            selector = bot_config.get("word_game_selector_prompt", "")
-            hidden_sys = (main_prompt + "\n\n" + selector).strip() if selector else main_prompt
-
-            hidden_response, _ = await generate(
-                prompt=inner_prompt,
-                context="",
-                config=bot_config,
-                system_prompt_override=hidden_sys,
-            )
-
-            # Parse {secret-word:WORD} from the response
-            word_match = re.search(r"\{secret-word:(.+?)\}", hidden_response)
-            if word_match:
-                secret = word_match.group(1).strip()
-                bot_config["secret_word"] = secret
-                save_config(bot_config)
-                await message.reply("✅ A new secret word has been set!", mention_author=False)
-            else:
-                await message.reply(
-                    "⚠️ Could not parse a secret word from the hidden turn. "
-                    "Make sure the selector prompt instructs the model to output `{secret-word:WORD}`.",
-                    mention_author=False,
-                )
-            return
-
         # ── Normal response flow ────────────────────────────────────────
         history_limit = bot_config.get("chat_history_limit", 30)
         history_messages = []
@@ -318,11 +287,12 @@ async def show_sys_instruct(interaction: discord.Interaction):
 # Slash commands — Text model mode
 # ---------------------------------------------------------------------------
 
-@bot.tree.command(name="set-model-mode", description="Switch between Gemini (default) and Gemma text model modes")
-@app_commands.describe(mode="default = standard Gemini, gemma = Gemma-compatible injection")
+@bot.tree.command(name="set-model-mode", description="Switch between Gemini, Gemma, and Custom text model modes")
+@app_commands.describe(mode="gemini = standard Gemini, gemma = Gemma-compatible injection, custom = external API")
 @app_commands.choices(mode=[
-    app_commands.Choice(name="default", value="default"),
+    app_commands.Choice(name="gemini",  value="gemini"),
     app_commands.Choice(name="gemma",   value="gemma"),
+    app_commands.Choice(name="custom",  value="custom"),
 ])
 @app_commands.default_permissions(administrator=True)
 async def set_model_mode(interaction: discord.Interaction, mode: app_commands.Choice[str]):
@@ -333,6 +303,14 @@ async def set_model_mode(interaction: discord.Interaction, mode: app_commands.Ch
         info = (
             f"\n⚠️ Gemma mode: system prompt injected into user content.\n"
             f"• Endpoint: `{ep}`"
+        )
+    elif mode.value == "custom":
+        ep = bot_config.get("model_endpoint_custom", "(not set)")
+        key_status = "set" if bot_config.get("api_key_custom", "").strip() else "not set"
+        info = (
+            f"\n⚠️ Custom mode: system prompt injected into user content.\n"
+            f"• Endpoint: `{ep}`\n"
+            f"• Custom API key: **{key_status}**"
         )
     else:
         ep = bot_config.get("model_endpoint_gemini", "gemini-2.0-flash")
@@ -540,6 +518,75 @@ async def set_word_game_selector_prompt(interaction: discord.Interaction, prompt
     )
 
 
+@bot.tree.command(name="set-secret-word", description="Trigger a hidden turn to pick a new secret word")
+@app_commands.describe(prompt="Theme or constraint for the secret word (e.g. 'animals', 'foods')")
+async def set_secret_word(interaction: discord.Interaction, prompt: str):
+    # --- Role-based permission check ---
+    allowed_roles = bot_config.get("secret_word_allowed_roles", [])
+    is_admin = interaction.user.guild_permissions.administrator if interaction.guild else False
+    has_role = any(str(role.id) in allowed_roles for role in getattr(interaction.user, "roles", []))
+    if not is_admin and not has_role:
+        await interaction.response.send_message(
+            "⚠️ You don't have permission to use this command. "
+            "Ask an admin to grant your role access via `/set-secret-word-permission`.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # Build hidden-turn system prompt: main + selector only
+    main_prompt = bot_config.get("system_prompt", "")
+    selector = bot_config.get("word_game_selector_prompt", "")
+    hidden_sys = (main_prompt + "\n\n" + selector).strip() if selector else main_prompt
+
+    hidden_response, _ = await generate(
+        prompt=prompt,
+        context="",
+        config=bot_config,
+        system_prompt_override=hidden_sys,
+    )
+
+    # Parse {secret-word:WORD} from the response
+    word_match = re.search(r"\{secret-word:(.+?)\}", hidden_response)
+    if word_match:
+        secret = word_match.group(1).strip()
+        bot_config["secret_word"] = secret
+        save_config(bot_config)
+        await interaction.followup.send("✅ A new secret word has been set!", ephemeral=True)
+    else:
+        await interaction.followup.send(
+            "⚠️ Could not parse a secret word from the hidden turn. "
+            "Make sure the selector prompt instructs the model to output `{secret-word:WORD}`.",
+            ephemeral=True,
+        )
+
+
+@bot.tree.command(name="set-secret-word-permission", description="Grant or revoke a role's access to /set-secret-word")
+@app_commands.describe(
+    role="The role to configure",
+    allowed="True = grant access, False = revoke access",
+)
+@app_commands.default_permissions(administrator=True)
+async def set_secret_word_permission(interaction: discord.Interaction, role: discord.Role, allowed: bool):
+    roles_list: list = bot_config.get("secret_word_allowed_roles", [])
+    role_id = str(role.id)
+    if allowed:
+        if role_id not in roles_list:
+            roles_list.append(role_id)
+        action = "granted"
+    else:
+        if role_id in roles_list:
+            roles_list.remove(role_id)
+        action = "revoked"
+    bot_config["secret_word_allowed_roles"] = roles_list
+    save_config(bot_config)
+    await interaction.response.send_message(
+        f"✅ `/set-secret-word` access **{action}** for role **{role.name}**.",
+        ephemeral=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Slash commands — Auto-chat mode
 # ---------------------------------------------------------------------------
@@ -593,6 +640,30 @@ async def set_auto_idle_message(interaction: discord.Interaction, message: str):
     save_config(bot_config)
     await interaction.response.send_message(
         f"✅ Auto-chat idle message set to:\n```{message}```", ephemeral=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slash commands — Custom model settings
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="set-api-key-custom", description="Set the API key for the custom (non-Google) model")
+@app_commands.describe(key="Your custom model API key")
+@app_commands.default_permissions(administrator=True)
+async def set_api_key_custom(interaction: discord.Interaction, key: str):
+    bot_config["api_key_custom"] = key
+    save_config(bot_config)
+    await interaction.response.send_message("✅ Custom API key has been set and saved.", ephemeral=True)
+
+
+@bot.tree.command(name="set-api-endpoint-custom", description="Set the endpoint for the custom (non-Google) model")
+@app_commands.describe(endpoint="Full URL or model name for your custom model")
+@app_commands.default_permissions(administrator=True)
+async def set_api_endpoint_custom(interaction: discord.Interaction, endpoint: str):
+    bot_config["model_endpoint_custom"] = endpoint
+    save_config(bot_config)
+    await interaction.response.send_message(
+        f"✅ Custom model endpoint set to **{endpoint}**.", ephemeral=True
     )
 
 
@@ -685,7 +756,7 @@ async def set_cr_params(interaction: discord.Interaction, minutes: int, seconds:
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🤖 ChatBuddy — Command Reference",
-        description="All commands except `/help` require **Administrator** permissions.",
+        description="All commands except `/help` and `/set-secret-word` require **Administrator** permissions.",
         color=discord.Color.blurple(),
     )
 
@@ -697,9 +768,11 @@ async def help_command(interaction: discord.Interaction):
             "`/set-temp` — Set model temperature (0.0 – 2.0)\n"
             "`/set-api-endpoint-gemini` — Set the Gemini model endpoint\n"
             "`/set-api-endpoint-gemma` — Set the Gemma model endpoint\n"
+            "`/set-api-key-custom` — Set the API key for a custom (non-Google) model\n"
+            "`/set-api-endpoint-custom` — Set the endpoint for a custom model\n"
             "`/set-sys-instruct` — Set the main system prompt\n"
             "`/show-sys-instruct` — Display the full effective system prompt\n"
-            "`/set-model-mode` — Switch between `default` (Gemini) and `gemma`"
+            "`/set-model-mode` — Switch between `gemini`, `gemma`, and `custom`"
         ),
         inline=False,
     )
@@ -709,9 +782,9 @@ async def help_command(interaction: discord.Interaction):
         value=(
             "`/set-dynamic-system-prompt` — Set an extra prompt (appended after main) + enable/disable\n"
             "`/set-word-game` — Set word game rules (`{secret-word}` placeholder) + enable/disable\n"
-            "`/set-word-game-selector-prompt` — Set the hidden-turn prompt for word selection\n\n"
-            "In chat, send `<set-secret-word[theme or constraint]>` to trigger a hidden turn "
-            "that picks a new secret word."
+            "`/set-word-game-selector-prompt` — Set the hidden-turn prompt for word selection\n"
+            "`/set-secret-word` — Trigger a hidden turn to pick a new secret word (role-gated)\n"
+            "`/set-secret-word-permission` — Grant/revoke a role's access to `/set-secret-word`"
         ),
         inline=False,
     )

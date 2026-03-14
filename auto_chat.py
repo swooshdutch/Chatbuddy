@@ -54,11 +54,10 @@ class AutoChatManager:
         self._task.start()
 
     def stop(self):
-        """Cancel the running loop if any."""
+        """Cancel the running loop if any.  Does NOT reset idle state."""
         if self._task and self._task.is_running():
             self._task.cancel()
         self._task = None
-        self._idle = False
 
     @property
     def is_idle(self) -> bool:
@@ -112,7 +111,10 @@ class AutoChatManager:
                 if idle_msg:
                     await channel.send(idle_msg)
                 self._idle = True
-                self.stop()
+                # Cancel the loop but keep _idle=True so reactivate() can detect it
+                if self._task and self._task.is_running():
+                    self._task.cancel()
+                self._task = None
             return
 
         # There's a new user message — reset idle counter and respond
