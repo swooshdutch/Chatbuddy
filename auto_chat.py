@@ -11,7 +11,7 @@ from discord.ext import tasks
 
 from config import save_config
 from gemini_api import generate, build_system_prompt
-from utils import format_context, chunk_message, resolve_custom_emoji, extract_thoughts
+from utils import format_context, chunk_message, resolve_custom_emoji, extract_thoughts, handle_soul_updates
 
 
 class AutoChatManager:
@@ -171,6 +171,9 @@ class AutoChatManager:
                     speaker_name=last_msg.author.display_name,
                     speaker_id=str(last_msg.author.id),
                 )
+
+                # Soul processing
+                response_text = handle_soul_updates(response_text, self.config)
 
                 # SoC thought extraction
                 soc_enabled = self.config.get("soc_enabled", False)

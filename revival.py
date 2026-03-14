@@ -12,7 +12,7 @@ from discord.ext import tasks
 
 from config import save_config
 from gemini_api import generate
-from utils import format_context, chunk_message, resolve_custom_emoji, extract_thoughts
+from utils import format_context, chunk_message, resolve_custom_emoji, extract_thoughts, handle_soul_updates
 
 
 class RevivalManager:
@@ -136,6 +136,9 @@ class RevivalManager:
             config=self.config,
             revival_system_instruct=system_instruct,
         )
+
+        # Soul processing
+        response_text = handle_soul_updates(response_text, self.config)
 
         if audio_bytes:
             audio_file = discord.File(fp=io.BytesIO(audio_bytes), filename="revival.wav")
@@ -264,6 +267,9 @@ class RevivalManager:
                     config=self.config,
                     revival_system_instruct=system_instruct,
                 )
+
+                # Soul processing
+                response_text = handle_soul_updates(response_text, self.config)
 
                 if audio_bytes:
                     audio_file = discord.File(fp=io.BytesIO(audio_bytes), filename="revival_reply.wav")

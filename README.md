@@ -1,4 +1,4 @@
-# ChatBuddy v3-6
+# ChatBuddy v3.1
 
 ChatBuddy is a Discord chatbot powered by Google Gemini (and optionally Gemma or custom external models) that participates in server conversations through mentions, auto-chat mode, and scheduled chat revival — with support for audio responses, a word guessing game, stream-of-consciousness thought extraction, and fully configurable behaviour via slash commands.
 
@@ -90,10 +90,18 @@ Mention the bot (`@ChatBuddy`) or reply to one of its messages. That's it!
 | Command | Description |
 |---|---|
 | `/set-dynamic-system-prompt` | Set an extra prompt appended after the main prompt + enable/disable |
+| `/set-soul` | Enable/disable the self-updating soul memory |
+| `/show-soul` | View current soul memory |
+| `/edit-soul` | Manually adjust the soul memory |
 | `/set-word-game` | Set word game rules (use `{secret-word}` placeholder) + enable/disable |
 | `/set-word-game-selector-prompt` | Set the hidden-turn prompt the model uses to pick a word |
 | `/set-secret-word` | Trigger a hidden turn to pick a new secret word *(role-gated)* |
 | `/set-secret-word-permission` | Grant or revoke a role's access to `/set-secret-word` |
+
+**💡 Note on Soul Memory:** 
+To use the Soul feature effectively, ensure you provide instructions in the main system prompt (via `/set-sys-instruct`) telling the bot *when* and *what* it should remember. The bot interacts with the soul file by outputting these exact tags in its response:
+- `<!soul-update: [text]>` to append new information.
+- `<!soul-override: [text]>` to completely overwrite the current memory.
 
 ### 🔊 Audio Clip Mode
 

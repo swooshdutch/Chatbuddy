@@ -11,8 +11,10 @@ Audio clip mode (audio_enabled = True/False — fully independent of model_mode)
   Gemini Live API WebSocket (tts.py).
 """
 
+import os
 import aiohttp
 
+from config import save_config
 from tts import generate_tts
 
 API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -50,6 +52,33 @@ def build_system_prompt(config: dict, *, include_word_game: bool = True) -> str:
         secret = config.get("secret_word", "")
         game_prompt = config["word_game_prompt"].replace("{secret-word}", secret)
         parts.append(game_prompt)
+
+    # Inject Soul from soul.md
+    if config.get("soul_enabled", False):
+        soul_text = ""
+        if os.path.exists("soul.md"):
+            try:
+                with open("soul.md", "r", encoding="utf-8") as f:
+                    soul_text = f.read().strip()
+            except Exception:
+                pass
+        
+        soul_instructions = (
+            "[SOUL — This is your mutable memory. "
+            "To append to it, output: <!soul-update: text>. "
+            "To overwrite it completely, output: <!soul-override: text>.]"
+        )
+        if soul_text:
+            parts.append(f"{soul_instructions}\n\nCURRENT SOUL CONTENT:\n{soul_text}")
+        else:
+            parts.append(f"{soul_instructions}\n\nCURRENT SOUL CONTENT:\n(empty)")
+
+    # Inject 1-turn soul error if it exists
+    soul_error = config.get("soul_error_turn", "")
+    if soul_error:
+        parts.append(f"[SYSTEM NOTICE FOR THIS TURN ONLY]\n{soul_error}")
+        config["soul_error_turn"] = ""
+        save_config(config)
 
     return "\n\n".join(p for p in parts if p)
 

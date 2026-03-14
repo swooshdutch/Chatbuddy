@@ -45,6 +45,10 @@ DEFAULTS = {
     "word_game_selector_prompt": "",  # system prompt for hidden word-selection turn
     "secret_word": "",
     "secret_word_allowed_roles": [],  # role IDs allowed to use /set-secret-word
+    # Soul (dynamic auto-updating memory)
+    "soul_enabled": False,
+    "soul_limit": 2000,
+    "soul_error_turn": "",  # stores 1-turn error message if update fails
     # Auto-chat mode
     "auto_chat_enabled": False,
     "auto_chat_channel_id": None,

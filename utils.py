@@ -4,6 +4,7 @@ Mention stripping, message chunking, context formatting, and emoji resolution.
 """
 
 import re
+import os
 from typing import List
 
 import discord
@@ -155,3 +156,86 @@ def extract_thoughts(text: str) -> tuple[str, str | None]:
     clean_text = pattern.sub("", text).strip()
 
     return clean_text, thoughts_text
+
+
+def extract_soul_updates(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """
+    Extract soul update commands from the response text.
+    
+    Returns (clean_text, updates):
+      - clean_text: text with all soul tags removed.
+      - updates: list of tuples (action, content) where action is 'update' or 'override'.
+    """
+    updates = []
+    
+    # Match <!soul-update: ...> or <!soul-override: ...>
+    # Use DOTALL to grab multi-line content if necessary
+    pattern = re.compile(r"<!soul-(update|override):\s*(.*?)>", re.DOTALL | re.IGNORECASE)
+    
+    for match in pattern.finditer(text):
+        action = match.group(1).lower()
+        content = match.group(2).strip()
+        updates.append((action, content))
+        
+    clean_text = pattern.sub("", text).strip()
+    return clean_text, updates
+
+
+def handle_soul_updates(response_text: str, config: dict) -> str:
+    """Extract soul tags, apply them immediately to soul.md if valid, and return cleaned text."""
+    soul_enabled = config.get("soul_enabled", False)
+    if not soul_enabled:
+        return response_text
+
+    clean_text, updates = extract_soul_updates(response_text)
+    if not updates:
+        return clean_text
+
+    soul_limit = config.get("soul_limit", 2000)
+    
+    # Read current
+    current_text = ""
+    if os.path.exists("soul.md"):
+        try:
+            with open("soul.md", "r", encoding="utf-8") as f:
+                current_text = f.read().strip()
+        except Exception as e:
+            print(f"[Soul] Error reading soul.md: {e}")
+
+    # Process updates (only the last one really takes effect if multiple)
+    new_text = current_text
+    applied = False
+    
+    for action, content in updates:
+        if action == "override":
+            new_text = content
+            applied = True
+        elif action == "update":
+            if new_text:
+                new_text += f"\n{content}"
+            else:
+                new_text = content
+            applied = True
+
+    if applied:
+        if len(new_text) > soul_limit:
+            # Reject update
+            print(f"[Soul] Update rejected: {len(new_text)} chars > {soul_limit} limit.")
+            # We record a 1-turn error injection
+            from config import save_config
+            config["soul_error_turn"] = (
+                f"System Error: Failed to update soul because it exceeded the {soul_limit} "
+                f"character limit (attempted {len(new_text)} chars). "
+                f"Faulty output rejected."
+            )
+            save_config(config)
+        else:
+            # Commit update
+            try:
+                with open("soul.md", "w", encoding="utf-8") as f:
+                    f.write(new_text)
+                print(f"[Soul] Updated soul.md ({len(new_text)} chars).")
+            except Exception as e:
+                print(f"[Soul] Failed to write soul.md: {e}")
+
+    return clean_text

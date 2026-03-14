@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from config import load_config, save_config
 from gemini_api import generate, build_system_prompt
-from utils import strip_mention, chunk_message, format_context, resolve_custom_emoji, extract_thoughts
+from utils import strip_mention, chunk_message, format_context, resolve_custom_emoji, extract_thoughts, extract_soul_updates, handle_soul_updates
 from revival import RevivalManager
 from auto_chat import AutoChatManager
 
@@ -100,7 +100,6 @@ async def _handle_soc_extraction(response_text: str, bot_ref, config: dict) -> s
                 await thought_channel.send(chunk)
     return clean_text
 
-
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
@@ -178,6 +177,9 @@ async def on_message(message: discord.Message):
             speaker_name=message.author.display_name,
             speaker_id=str(message.author.id),
         )
+
+        # Soul processing
+        response_text = handle_soul_updates(response_text, bot_config)
 
         # SoC thought extraction
         response_text = await _handle_soc_extraction(response_text, bot, bot_config)
@@ -520,6 +522,7 @@ async def set_word_game_selector_prompt(interaction: discord.Interaction, prompt
 
 @bot.tree.command(name="set-secret-word", description="Trigger a hidden turn to pick a new secret word")
 @app_commands.describe(prompt="Theme or constraint for the secret word (e.g. 'animals', 'foods')")
+@app_commands.default_permissions()
 async def set_secret_word(interaction: discord.Interaction, prompt: str):
     # --- Role-based permission check ---
     allowed_roles = bot_config.get("secret_word_allowed_roles", [])
@@ -641,6 +644,96 @@ async def set_auto_idle_message(interaction: discord.Interaction, message: str):
     await interaction.response.send_message(
         f"✅ Auto-chat idle message set to:\n```{message}```", ephemeral=True
     )
+
+
+# ---------------------------------------------------------------------------
+# Slash commands — Soul feature
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="set-soul", description="Enable or disable the dynamic soul prompt and set its limit")
+@app_commands.describe(
+    enabled="True = active, False = disabled",
+    limit="Max physical character limit of the soul text (default 2000)",
+)
+@app_commands.default_permissions(administrator=True)
+async def set_soul(interaction: discord.Interaction, enabled: bool, limit: int = 2000):
+    if limit < 100:
+        await interaction.response.send_message("⚠️ Limit must be at least 100.", ephemeral=True)
+        return
+    bot_config["soul_enabled"] = enabled
+    bot_config["soul_limit"] = limit
+    save_config(bot_config)
+    state = "enabled" if enabled else "disabled"
+    await interaction.response.send_message(
+        f"✅ Soul feature **{state}** with a limit of **{limit}** characters.\n"
+        f"Bot uses `<!soul-update: text>` and `<!soul-override: text>` to update it.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="show-soul", description="View the current contents of the soul")
+@app_commands.default_permissions(administrator=True)
+async def show_soul(interaction: discord.Interaction):
+    if not os.path.exists("soul.md"):
+        await interaction.response.send_message("📝 Soul is currently **empty** (file does not exist).", ephemeral=True)
+        return
+    
+    with open("soul.md", "r", encoding="utf-8") as f:
+        soul_text = f.read().strip()
+        
+    if not soul_text:
+        await interaction.response.send_message("📝 Soul is currently **empty**.", ephemeral=True)
+        return
+
+    full_text = f"📝 **Current Soul:**\n```\n{soul_text}\n```"
+    chunks = chunk_message(full_text)
+    await interaction.response.send_message(chunks[0], ephemeral=True)
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
+
+
+@bot.tree.command(name="edit-soul", description="Manually append, overwrite, or wipe the soul file")
+@app_commands.describe(
+    wipe="True = delete everything in the soul file",
+    append="Text to add to the end",
+    overwrite="Text to replace the entire soul with",
+)
+@app_commands.default_permissions(administrator=True)
+async def edit_soul(
+    interaction: discord.Interaction,
+    wipe: bool = False,
+    append: str | None = None,
+    overwrite: str | None = None
+):
+    soul_limit = bot_config.get("soul_limit", 2000)
+    current_text = ""
+    if os.path.exists("soul.md") and not wipe and not overwrite:
+        with open("soul.md", "r", encoding="utf-8") as f:
+            current_text = f.read().strip()
+            
+    new_text = current_text
+    if wipe:
+        new_text = ""
+    if overwrite:
+        new_text = overwrite.replace("\\n", "\n")
+    if append:
+        append_txt = append.replace("\\n", "\n")
+        new_text = f"{new_text}\n{append_txt}" if new_text else append_txt
+
+    new_text = new_text.strip()
+    
+    if len(new_text) > soul_limit:
+        await interaction.response.send_message(
+            f"⚠️ Manual edit rejected: too large ({len(new_text)} > {soul_limit} limit).", 
+            ephemeral=True
+        )
+        return
+
+    with open("soul.md", "w", encoding="utf-8") as f:
+        f.write(new_text)
+        
+    action = "wiped" if (wipe and not append and not overwrite) else "updated"
+    await interaction.response.send_message(f"✅ Soul successfully {action} manually.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +874,10 @@ async def help_command(interaction: discord.Interaction):
         name="📝 Dynamic & Game Prompts",
         value=(
             "`/set-dynamic-system-prompt` — Set an extra prompt (appended after main) + enable/disable\n"
+            "`/set-soul` — Enable/disable the self-updating soul memory\n"
+            "`/show-soul` — View current soul memory\n"
+            "`/edit-soul` — Manually adjust the soul memory\n"
+            "*Note: For Soul to work best, instruct the bot in its system prompt to save memories using `<!soul-update: text>` or `<!soul-override: text>`.*\n\n"
             "`/set-word-game` — Set word game rules (`{secret-word}` placeholder) + enable/disable\n"
             "`/set-word-game-selector-prompt` — Set the hidden-turn prompt for word selection\n"
             "`/set-secret-word` — Trigger a hidden turn to pick a new secret word (role-gated)\n"
