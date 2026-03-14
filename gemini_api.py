@@ -65,9 +65,11 @@ def build_system_prompt(config: dict, *, include_word_game: bool = True) -> str:
                 pass
         
         soul_instructions = (
-            "[SOUL — This is your mutable memory. "
-            "To append to it, output: <!soul-update: text>. "
-            "To overwrite it completely, output: <!soul-override: text>.]"
+            "[SOUL — This is your mutable memory system.\n"
+            "To add a completely new memory entry, output: <!soul-add-new[id]: text>\n"
+            "To append to an existing entry ID, output: <!soul-update[id]: text>\n"
+            "To completely overwrite an entry ID, output: <!soul-override[id]: text>\n"
+            "To delete an entry ID, output: <!soul-delete[id]>]"
         )
         if soul_text:
             parts.append(f"{soul_instructions}\n\nCURRENT SOUL CONTENT:\n{soul_text}")

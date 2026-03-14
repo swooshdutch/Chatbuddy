@@ -530,7 +530,6 @@ async def set_word_game_selector_prompt(interaction: discord.Interaction, prompt
 
 @bot.tree.command(name="set-secret-word", description="Trigger a hidden turn to pick a new secret word")
 @app_commands.describe(prompt="Theme or constraint for the secret word (e.g. 'animals', 'foods')")
-@app_commands.default_permissions()
 async def set_secret_word(interaction: discord.Interaction, prompt: str):
     # --- Role-based permission check ---
     allowed_roles = bot_config.get("secret_word_allowed_roles", [])

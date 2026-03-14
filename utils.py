@@ -173,7 +173,7 @@ def extract_soul_updates(text: str) -> tuple[str, list[tuple[str, str, str]]]:
     # Match <!soul-add-new[id]: ...>, <!soul-update[id]: ...>, <!soul-override[id]: ...>, <!soul-delete[id]>
     # Handle possible markdown escaping or spaces (e.g. \<\!soul-update\[1\]:)
     pattern = re.compile(
-        r"\\?<\s*\\?!\s*soul-(add-new|update|override|delete)\s*\\?\[\s*(.+?)\s*\\?\](?:(?:\\s*:\\s*)(.*?))?\\?>", 
+        r"\\?<\s*\\?!\s*soul-(add-new|update|override|delete)\s*\\?\[\s*(.+?)\s*\\?\](?:\s*:\s*(.*?))?\s*\\?>", 
         re.DOTALL | re.IGNORECASE
     )
     
