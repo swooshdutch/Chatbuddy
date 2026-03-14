@@ -15,7 +15,7 @@ import os
 import aiohttp
 
 from config import save_config
-from utils import handle_soul_updates
+from utils import handle_soul_updates, extract_thoughts
 from tts import generate_tts
 
 API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -259,7 +259,13 @@ async def generate(
 
     voice = config.get("audio_settings", {}).get("voice", "Aoede")
 
-    wav_bytes = await generate_tts(api_key, tts_endpoint, voice, text_reply)
+    # Ensure thoughts are stripped from audio generation
+    tts_text, _ = extract_thoughts(text_reply)
+    if not tts_text.strip():
+        # If the response was ONLY thoughts, no need to synthesize empty audio
+        return text_reply, None, soul_logs
+
+    wav_bytes = await generate_tts(api_key, tts_endpoint, voice, tts_text)
 
     if wav_bytes is None:
         return text_reply, None, soul_logs
