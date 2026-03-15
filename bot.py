@@ -122,6 +122,15 @@ async def on_ready():
     except Exception as e:
         print(f"[ChatBuddy] Failed to sync commands: {e}")
 
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def purgecommands(ctx):
+    """Nuke all guild-specific slash commands and resync global ones to clear 'ghosts'."""
+    bot.tree.clear_commands(guild=ctx.guild)
+    await bot.tree.sync(guild=ctx.guild)
+    await ctx.send(f"✅ Wiped old guild slash commands and refreshed the tree for {ctx.guild.name}.")
+
+
 
 @bot.event
 async def on_message(message: discord.Message):
