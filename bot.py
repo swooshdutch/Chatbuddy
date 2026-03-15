@@ -161,7 +161,11 @@ async def on_message(message: discord.Message):
                 # Fall through to normal response below
 
     if not is_mentioned and not is_reply_to_bot:
+        await bot.process_commands(message)
         return
+
+    # If it is mentioned, also make sure we process commands in case it's a command too
+    await bot.process_commands(message)
 
     async with message.channel.typing():
         user_text = strip_mention(message.content, bot.user.id)
