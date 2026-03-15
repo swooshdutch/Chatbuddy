@@ -556,7 +556,7 @@ async def set_secret_word(interaction: discord.Interaction, prompt: str):
     selector = bot_config.get("word_game_selector_prompt", "")
     hidden_sys = (main_prompt + "\n\n" + selector).strip() if selector else main_prompt
 
-    hidden_response, _ = await generate(
+    hidden_response, _, _ = await generate(
         prompt=prompt,
         context="",
         config=bot_config,
